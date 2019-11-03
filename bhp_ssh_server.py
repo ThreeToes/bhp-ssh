@@ -36,6 +36,8 @@ class Server:
         self.ssh_server = ssh_server
         self.stop = False
         self.key = key
+        self.reader_thread = threading.Thread(target=self.__listen_loop)
+        self.accept_thread = threading.Thread(target=self.__accept_loop)
 
     def __read_msgs(self, socks):
         buffers = dict()
@@ -106,17 +108,6 @@ class Server:
             except Exception as e:
                 print('[!!] Problem creating connection')
 
-    def run(self):
-        self.reader_thread = threading.Thread(target=self.__listen_loop)
-        self.accept_thread = threading.Thread(target=self.__accept_loop)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self.ip, self.port))
-        self.server_sock = sock
-        self.accept_thread.start()
-        self.reader_thread.start()
-        self.__input_loop()
-
     def __input_loop(self):
         try:
             while not self.stop:
@@ -134,12 +125,14 @@ class Server:
         self.accept_thread.join()
         self.reader_thread.join()
 
-
-def bind_socket(ip, port):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((ip, port))
-    return sock
+    def run(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.ip, self.port))
+        self.server_sock = sock
+        self.accept_thread.start()
+        self.reader_thread.start()
+        self.__input_loop()
 
 
 def parse_args(args):
