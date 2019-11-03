@@ -2,11 +2,11 @@ import argparse
 import socket
 import sys
 import threading
-
+import select
 import paramiko
 
 
-class Server(paramiko.ServerInterface):
+class SshServer(paramiko.ServerInterface):
     def __init__(self, username, password):
         self.event = threading.Event()
         self.username = username
@@ -22,6 +22,107 @@ class Server(paramiko.ServerInterface):
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
+    def get_banner(self):
+        return 'Welcome to the super happy fun time jamboree!', 'en-US'
+
+
+class Server:
+    def __init__(self, ip, port, ssh_server, key):
+        self.ip = ip
+        self.port = port
+        self.sockets = []
+        self.address_lookup = dict()
+        self.ssh_server = ssh_server
+        self.stop = False
+        self.key = key
+
+    def __read_msgs(self, socks):
+        buffers = dict()
+        # Initialise the buffers
+        for sock in socks:
+            buffers[sock] = bytearray()
+        to_read = socks
+        while len(to_read) > 0:
+            # Loop over and build up our buffers
+            (to_read, _, _) = select.select(to_read, [], [], 0.001)
+            non_zero = []
+            for sock in to_read:
+                msg = sock.recv(1024)
+
+                if len(msg) == 0 or msg == b'\xff\xf4\xff\xfd\x06':
+                    buffers[sock] = b''
+                    continue
+                buffers[sock].extend(msg)
+                non_zero.append(sock)
+            to_read = non_zero
+        return buffers
+
+    def __listen_loop(self):
+        try:
+            while not self.stop:
+                (reads, _, _) = select.select(self.sockets, [], [], 5)
+                if len(reads) == 0:
+                    continue
+                buffs = self.__read_msgs(reads)
+                for k in buffs.keys():
+                    v = buffs[k]
+                    if len(v) == 0:
+                        self.sockets.remove(k)
+                        self.address_lookup.pop(k)
+                        print('[*] Socket shutdown')
+                        continue
+                    print('[<] Received "{}" from {}'.format(v.decode('utf-8').strip(), self.address_lookup[k]))
+        except KeyboardInterrupt as e:
+            print('[!!] Caught a keyboard interrupt, shutting it down')
+            self.stop = True
+        finally:
+            for sock in self.sockets:
+                sock.close()
+
+    def __accept_loop(self):
+        self.server_sock.listen(100)
+        while not self.stop:
+            try:
+                (client, addr) = self.server_sock.accept()
+                print("[<] Received connection from {}".format(addr))
+                # Elevate our socket to an SSH socket
+                ssh_session = paramiko.Transport(client)
+                ssh_session.add_server_key(self.key)
+                ssh_session.start_server(server=self.ssh_server)
+                chan = ssh_session.accept(30)
+                print("[+] Connection from {} elevated".format(addr))
+                chan.send(b'Welcome to cool_and_totally_not_sarcastic_hacker_ssh')
+                self.sockets.append(chan)
+                self.address_lookup[chan] = addr
+            except KeyboardInterrupt as e:
+                self.stop = True
+                print('[!!] Caught keyboard interrupt, shutting down')
+            except Exception as e:
+                print('[!!] Problem creating connection')
+
+    def run(self):
+        self.reader_thread = threading.Thread(target=self.__listen_loop)
+        self.accept_thread = threading.Thread(target=self.__accept_loop)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.ip, self.port))
+        self.server_sock = sock
+        self.accept_thread.start()
+        self.reader_thread.start()
+        self.__input_loop()
+
+    def __input_loop(self):
+        while not self.stop:
+            cmd = input("Enter command: ")
+            if cmd == 'exit':
+                break
+            for s in self.sockets:
+                s.send(cmd.encode())
+        self.stop = True
+        print('[!!] Exiting')
+        self.accept_thread.join()
+        self.reader_thread.join()
+
 
 def bind_socket(ip, port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -35,6 +136,8 @@ def parse_args(args):
     parser.add_argument('-k', '--keyfile', dest='keyfile', help='The key file for the server to use')
     parser.add_argument('-o', '--host', dest='host', help='IP to listen on')
     parser.add_argument('-p', '--port', dest='port', help='Port to listen on', type=int)
+    parser.add_argument('-l', '--key-length', dest='keylength', default=2048,
+                        help='Length of the key to generate', type=int)
     # TODO: Key authentication
     parser.add_argument('-u', '--username', dest='username', help='Username to authenticate with')
     parser.add_argument('-a', '--password', dest='password', help='Password to authenticate with')
@@ -43,48 +146,10 @@ def parse_args(args):
 
 if __name__ == '__main__':
     args = parse_args(sys.argv[1:])
-    if args.keyfile == "":
-        print('[!!] Keyfile not supplied')
-        exit(1)
-    try:
-        sock = bind_socket(args.host, args.port)
-        sock.listen(100)
-    except Exception as e:
-        print('[!!] Failed to bind socket')
-        exit(1)
-    try:
-        (client, addr) = sock.accept()
-    except Exception as e:
-        print('[!!] Could not get a connection')
-        exit(1)
-    try:
-        # Elevate our transport
-        ssh_session = paramiko.Transport(client)
+    if args.keyfile:
         key = paramiko.RSAKey.from_private_key_file(args.keyfile)
-        ssh_session.add_server_key(key)
-        server = Server(args.username, args.password)
-        ssh_session.start_server(server=server)
-        chan = ssh_session.accept(30)
-    except Exception as e:
-        print('[!!] Could not elevate our socket to SSH transport')
-        print(e)
-        exit(1)
-    print("[+] *90s hacker voice* I'm in")
-    chan.send(b'Welcome to cool_and_totally_not_sarcastic_hacker_ssh')
-    try:
-        while True:
-            try:
-                command = input('Enter command: ').strip('\n')
-                if command == 'exit':
-                    chan.send(b'exit')
-                    break
-                chan.send(command.encode())
-                print(chan.recv(1024).decode('utf-8'))
-            except KeyboardInterrupt:
-                print('[!!] Caught a keyboard interrupt')
-                break
-            except Exception as e:
-                print('[!!] Caught an exception: ' + str(e))
-                break
-    finally:
-        ssh_session.close()
+    else:
+        key = paramiko.RSAKey.generate(args.keylength)
+    ssh_server = SshServer(args.username, args.password)
+    server = Server(args.host, args.port, ssh_server, key)
+    server.run()
