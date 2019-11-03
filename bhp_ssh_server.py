@@ -1,8 +1,9 @@
 import argparse
+import select
 import socket
 import sys
 import threading
-import select
+
 import paramiko
 
 
@@ -60,7 +61,7 @@ class Server:
     def __listen_loop(self):
         try:
             while not self.stop:
-                (reads, _, _) = select.select(self.sockets, [], [], 5)
+                (reads, _, _) = select.select(self.sockets, [], [], 1)
                 if len(reads) == 0:
                     continue
                 buffs = self.__read_msgs(reads)
@@ -84,6 +85,8 @@ class Server:
         while not self.stop:
             try:
                 (client, addr) = self.server_sock.accept()
+                if self.stop:
+                    continue
                 print("[<] Received connection from {}".format(addr))
                 # Elevate our socket to an SSH socket
                 ssh_session = paramiko.Transport(client)
@@ -97,6 +100,9 @@ class Server:
             except KeyboardInterrupt as e:
                 self.stop = True
                 print('[!!] Caught keyboard interrupt, shutting down')
+            except InterruptedError as e:
+                self.stop = True
+                print('[!!] Interupted, extiting')
             except Exception as e:
                 print('[!!] Problem creating connection')
 
@@ -112,14 +118,19 @@ class Server:
         self.__input_loop()
 
     def __input_loop(self):
-        while not self.stop:
-            cmd = input("Enter command: ")
-            if cmd == 'exit':
-                break
-            for s in self.sockets:
-                s.send(cmd.encode())
+        try:
+            while not self.stop:
+                cmd = input("Enter command: ")
+                if cmd == 'exit':
+                    break
+                for s in self.sockets:
+                    s.send(cmd.encode())
+        except KeyboardInterrupt as e:
+            print('')
+            print("[!!] Caught keyboard interrupt, exiting")
         self.stop = True
-        print('[!!] Exiting')
+        # Force the listen loop to quit
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((self.ip, self.port))
         self.accept_thread.join()
         self.reader_thread.join()
 
